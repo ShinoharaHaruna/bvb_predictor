@@ -8,8 +8,10 @@ import pandas as pd
 
 @dataclass(frozen=True)
 class LeagueRollingConfig:
+    l1: int = 1
+    l3: int = 3
     l5: int = 5
-    l10: int = 10
+    ema_span: int = 5
 
 
 def build_league_features(
@@ -88,7 +90,11 @@ def build_league_features(
 
     team_group = long_df.groupby("team", sort=False)
 
-    for name, window in ("l5", cfg.l5), ("l10", cfg.l10):
+    for name, window in (
+        ("l1", cfg.l1),
+        ("l3", cfg.l3),
+        ("l5", cfg.l5),
+    ):
         long_df[f"avg_gf_{name}"] = team_group["gf"].transform(
             lambda s: s.rolling(window=window, min_periods=1).mean().shift(1)
         )
@@ -101,6 +107,14 @@ def build_league_features(
             lambda s: s.rolling(window=window, min_periods=1).mean().shift(1)
         )
 
+    long_df["ema_gf"] = team_group["gf"].transform(
+        lambda s: s.ewm(span=cfg.ema_span, adjust=False).mean().shift(1)
+    )
+    long_df["ema_ga"] = team_group["ga"].transform(
+        lambda s: s.ewm(span=cfg.ema_span, adjust=False).mean().shift(1)
+    )
+    long_df["ema_gd"] = long_df["ema_gf"] - long_df["ema_ga"]
+
     # Home-only and away-only
     for side, mask in ("home", long_df["is_home"] == 1), (
         "away",
@@ -109,24 +123,41 @@ def build_league_features(
         sub = long_df.loc[mask, ["team", "date", "match_idx", "gf", "ga"]].copy()
         sub = sub.sort_values(["team", "date", "match_idx"]).reset_index(drop=True)
         g = sub.groupby("team", sort=False)
-        sub[f"avg_gf_{side}_l10"] = g["gf"].transform(
-            lambda s: s.rolling(window=cfg.l10, min_periods=1).mean().shift(1)
+        sub[f"avg_gf_{side}_l3"] = g["gf"].transform(
+            lambda s: s.rolling(window=cfg.l3, min_periods=1).mean().shift(1)
         )
-        sub[f"avg_ga_{side}_l10"] = g["ga"].transform(
-            lambda s: s.rolling(window=cfg.l10, min_periods=1).mean().shift(1)
+        sub[f"avg_ga_{side}_l3"] = g["ga"].transform(
+            lambda s: s.rolling(window=cfg.l3, min_periods=1).mean().shift(1)
         )
-        sub[f"avg_gd_{side}_l10"] = g["gf"].transform(
-            lambda s: s.rolling(window=cfg.l10, min_periods=1).mean().shift(1)
-        ) - g["ga"].transform(
-            lambda s: s.rolling(window=cfg.l10, min_periods=1).mean().shift(1)
-        )
+        sub[f"avg_gd_{side}_l3"] = sub[f"avg_gf_{side}_l3"] - sub[f"avg_ga_{side}_l3"]
 
-        long_df[f"avg_gf_{side}_l10"] = np.nan
-        long_df[f"avg_ga_{side}_l10"] = np.nan
-        long_df[f"avg_gd_{side}_l10"] = np.nan
-        long_df.loc[mask, f"avg_gf_{side}_l10"] = sub[f"avg_gf_{side}_l10"].to_numpy()
-        long_df.loc[mask, f"avg_ga_{side}_l10"] = sub[f"avg_ga_{side}_l10"].to_numpy()
-        long_df.loc[mask, f"avg_gd_{side}_l10"] = sub[f"avg_gd_{side}_l10"].to_numpy()
+        sub[f"ema_gf_{side}"] = g["gf"].transform(
+            lambda s: s.ewm(span=cfg.ema_span, adjust=False).mean().shift(1)
+        )
+        sub[f"ema_ga_{side}"] = g["ga"].transform(
+            lambda s: s.ewm(span=cfg.ema_span, adjust=False).mean().shift(1)
+        )
+        sub[f"ema_gd_{side}"] = sub[f"ema_gf_{side}"] - sub[f"ema_ga_{side}"]
+
+        for c in (
+            f"avg_gf_{side}_l3",
+            f"avg_ga_{side}_l3",
+            f"avg_gd_{side}_l3",
+            f"ema_gf_{side}",
+            f"ema_ga_{side}",
+            f"ema_gd_{side}",
+        ):
+            long_df[c] = np.nan
+
+        for c in (
+            f"avg_gf_{side}_l3",
+            f"avg_ga_{side}_l3",
+            f"avg_gd_{side}_l3",
+            f"ema_gf_{side}",
+            f"ema_ga_{side}",
+            f"ema_gd_{side}",
+        ):
+            long_df.loc[mask, c] = sub[c].to_numpy()
 
     # Split home/away role back
     home_feat = long_df.loc[long_df["is_home"] == 1].set_index("match_idx")
@@ -137,34 +168,41 @@ def build_league_features(
 
     df["home_avg_gf_l5"] = home_feat["avg_gf_l5"].reindex(df.index).to_numpy()
     df["home_avg_ga_l5"] = home_feat["avg_ga_l5"].reindex(df.index).to_numpy()
-    df["home_avg_gf_l10"] = home_feat["avg_gf_l10"].reindex(df.index).to_numpy()
-    df["home_avg_ga_l10"] = home_feat["avg_ga_l10"].reindex(df.index).to_numpy()
+    df["home_avg_gf_l3"] = home_feat["avg_gf_l3"].reindex(df.index).to_numpy()
+    df["home_avg_ga_l3"] = home_feat["avg_ga_l3"].reindex(df.index).to_numpy()
+    df["home_avg_gd_l3"] = home_feat["avg_gd_l3"].reindex(df.index).to_numpy()
     df["home_avg_gd_l5"] = home_feat["avg_gd_l5"].reindex(df.index).to_numpy()
-    df["home_avg_gd_l10"] = home_feat["avg_gd_l10"].reindex(df.index).to_numpy()
-    df["home_avg_gf_home_l10"] = (
-        home_feat["avg_gf_home_l10"].reindex(df.index).to_numpy()
-    )
-    df["home_avg_ga_home_l10"] = (
-        home_feat["avg_ga_home_l10"].reindex(df.index).to_numpy()
-    )
-    df["home_avg_gd_home_l10"] = (
-        home_feat["avg_gd_home_l10"].reindex(df.index).to_numpy()
-    )
+
+    df["home_ema_gf"] = home_feat["ema_gf"].reindex(df.index).to_numpy()
+    df["home_ema_ga"] = home_feat["ema_ga"].reindex(df.index).to_numpy()
+    df["home_ema_gd"] = home_feat["ema_gd"].reindex(df.index).to_numpy()
+    df["home_avg_gf_home_l3"] = home_feat["avg_gf_home_l3"].reindex(df.index).to_numpy()
+    df["home_avg_ga_home_l3"] = home_feat["avg_ga_home_l3"].reindex(df.index).to_numpy()
+    df["home_avg_gd_home_l3"] = home_feat["avg_gd_home_l3"].reindex(df.index).to_numpy()
+
+    df["home_ema_gf_home"] = home_feat["ema_gf_home"].reindex(df.index).to_numpy()
+    df["home_ema_ga_home"] = home_feat["ema_ga_home"].reindex(df.index).to_numpy()
+    df["home_ema_gd_home"] = home_feat["ema_gd_home"].reindex(df.index).to_numpy()
 
     df["away_avg_gf_l5"] = away_feat["avg_gf_l5"].reindex(df.index).to_numpy()
     df["away_avg_ga_l5"] = away_feat["avg_ga_l5"].reindex(df.index).to_numpy()
-    df["away_avg_gf_l10"] = away_feat["avg_gf_l10"].reindex(df.index).to_numpy()
-    df["away_avg_ga_l10"] = away_feat["avg_ga_l10"].reindex(df.index).to_numpy()
-    df["away_avg_gf_away_l10"] = (
-        away_feat["avg_gf_away_l10"].reindex(df.index).to_numpy()
-    )
-    df["away_avg_ga_away_l10"] = (
-        away_feat["avg_ga_away_l10"].reindex(df.index).to_numpy()
-    )
+    df["away_avg_gf_l3"] = away_feat["avg_gf_l3"].reindex(df.index).to_numpy()
+    df["away_avg_ga_l3"] = away_feat["avg_ga_l3"].reindex(df.index).to_numpy()
+    df["away_avg_gd_l3"] = away_feat["avg_gd_l3"].reindex(df.index).to_numpy()
+
+    df["away_ema_gf"] = away_feat["ema_gf"].reindex(df.index).to_numpy()
+    df["away_ema_ga"] = away_feat["ema_ga"].reindex(df.index).to_numpy()
+    df["away_ema_gd"] = away_feat["ema_gd"].reindex(df.index).to_numpy()
+
+    df["away_avg_gf_away_l3"] = away_feat["avg_gf_away_l3"].reindex(df.index).to_numpy()
+    df["away_avg_ga_away_l3"] = away_feat["avg_ga_away_l3"].reindex(df.index).to_numpy()
+    df["away_avg_gd_away_l3"] = away_feat["avg_gd_away_l3"].reindex(df.index).to_numpy()
+
+    df["away_ema_gf_away"] = away_feat["ema_gf_away"].reindex(df.index).to_numpy()
+    df["away_ema_ga_away"] = away_feat["ema_ga_away"].reindex(df.index).to_numpy()
+    df["away_ema_gd_away"] = away_feat["ema_gd_away"].reindex(df.index).to_numpy()
 
     df["away_avg_gd_l5"] = df["away_avg_gf_l5"] - df["away_avg_ga_l5"]
-    df["away_avg_gd_l10"] = df["away_avg_gf_l10"] - df["away_avg_ga_l10"]
-    df["away_avg_gd_away_l10"] = df["away_avg_gf_away_l10"] - df["away_avg_ga_away_l10"]
 
     # Fill initial NaNs using global means (train split will re-standardize later).
     # Use an explicit numeric feature list to avoid accidentally casting string columns.
@@ -177,28 +215,41 @@ def build_league_features(
         "odds_home",
         "odds_draw",
         "odds_away",
+        "odds_available",
         "odds_overround",
         "prob_home",
         "prob_draw",
         "prob_away",
+        "home_avg_gf_l3",
+        "home_avg_ga_l3",
+        "home_avg_gd_l3",
         "home_avg_gf_l5",
         "home_avg_ga_l5",
-        "home_avg_gf_l10",
-        "home_avg_ga_l10",
-        "home_avg_gf_home_l10",
-        "home_avg_ga_home_l10",
+        "home_ema_gf",
+        "home_ema_ga",
+        "home_ema_gd",
+        "home_avg_gf_home_l3",
+        "home_avg_ga_home_l3",
+        "home_avg_gd_home_l3",
         "home_avg_gd_l5",
-        "home_avg_gd_l10",
-        "home_avg_gd_home_l10",
+        "home_ema_gf_home",
+        "home_ema_ga_home",
+        "home_ema_gd_home",
+        "away_avg_gf_l3",
+        "away_avg_ga_l3",
+        "away_avg_gd_l3",
         "away_avg_gf_l5",
         "away_avg_ga_l5",
-        "away_avg_gf_l10",
-        "away_avg_ga_l10",
-        "away_avg_gf_away_l10",
-        "away_avg_ga_away_l10",
+        "away_ema_gf",
+        "away_ema_ga",
+        "away_ema_gd",
+        "away_avg_gf_away_l3",
+        "away_avg_ga_away_l3",
+        "away_avg_gd_away_l3",
+        "away_ema_gf_away",
+        "away_ema_ga_away",
+        "away_ema_gd_away",
         "away_avg_gd_l5",
-        "away_avg_gd_l10",
-        "away_avg_gd_away_l10",
     ]
 
     for c in numeric_cols:

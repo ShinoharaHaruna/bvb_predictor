@@ -1,0 +1,72 @@
+[project]
+name = "bvb_predictor"
+version = "0.1.0"
+description = "A deep learning project to predict exact match scores for Borussia Dortmund, leveraging historical data, team statistics, and advanced feature engineering."
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [{ name = "Theo Zhu", email = "shinoharaharuna@outlook.com" }]
+dependencies = [
+    "numpy>=2.3.5",
+    "pandas>=2.3.3",
+    "torch>=2.6.0",
+    "tqdm>=4.67.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-cov", "black", "ruff", "mypy"]
+
+# Configure PyTorch
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu124", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+torchvision = [
+    { index = "pytorch-cu124", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+
+# --- Tool Configurations --- #
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["bvb_predictor"]
+
+[tool.black]
+line-length = 88
+
+[tool.mypy]
+strict = true
+
+[tool.pytest.ini_options]
+minversion = "6.0"
+addopts = "-ra -q"
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+# Available PyTorch indices
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true

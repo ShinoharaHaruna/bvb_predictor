@@ -1,6 +1,7 @@
 name: Train and Release Artifacts
 
 on:
+  workflow_dispatch:
   push:
     tags:
       - "v*"

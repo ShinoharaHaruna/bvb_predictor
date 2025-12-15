@@ -1,0 +1,52 @@
+name: Train and Release Artifacts
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  train-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache uv
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/uv
+            ~/.local/share/uv
+          key: ${{ runner.os }}-uv-${{ hashFiles('**/uv.lock', '**/pyproject.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-uv-
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Build dataset
+        run: bash build_dataset.sh
+
+      - name: Train models (CPU)
+        env:
+          DEVICE: cpu
+        run: bash run_train.sh
+
+      - name: Create GitHub Release and upload artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" --generate-notes
+          gh release upload "${GITHUB_REF_NAME}" artifacts/* --clobber

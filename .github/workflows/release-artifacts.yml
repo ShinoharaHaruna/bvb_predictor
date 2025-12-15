@@ -45,6 +45,10 @@ jobs:
           DEVICE: cpu
         run: bash run_train.sh
 
+      - name: Export ONNX
+        run: |
+          uv run scripts/export_onnx.py --model artifacts/model.pt --out artifacts/model.onnx --odds-model artifacts/odds.pt --odds-out artifacts/odds.onnx
+
       - name: Create GitHub Release and upload artifacts
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

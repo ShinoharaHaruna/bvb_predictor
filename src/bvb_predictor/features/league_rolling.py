@@ -38,23 +38,41 @@ def build_league_features(
     else:
         df["season_start_year"] = df["date"].dt.year.astype(np.int64)
 
-    # Odds
+    # Odds / implied probabilities
     for c in ("odds_home", "odds_draw", "odds_away"):
         if c not in df.columns:
             df[c] = np.nan
-    df["odds_available"] = (
-        df[["odds_home", "odds_draw", "odds_away"]].notna().all(axis=1).astype(np.int64)
-    )
+    for c in ("prob_home", "prob_draw", "prob_away"):
+        if c not in df.columns:
+            df[c] = np.nan
+    if "odds_overround" not in df.columns:
+        df["odds_overround"] = np.nan
+
+    odds_available = df[["odds_home", "odds_draw", "odds_away"]].notna().all(axis=1)
 
     inv_home = 1.0 / df["odds_home"].astype(np.float64)
     inv_draw = 1.0 / df["odds_draw"].astype(np.float64)
     inv_away = 1.0 / df["odds_away"].astype(np.float64)
     inv_sum = inv_home + inv_draw + inv_away
 
-    df["odds_overround"] = inv_sum.astype(np.float64)
-    df["prob_home"] = (inv_home / inv_sum).astype(np.float64)
-    df["prob_draw"] = (inv_draw / inv_sum).astype(np.float64)
-    df["prob_away"] = (inv_away / inv_sum).astype(np.float64)
+    df.loc[odds_available, "odds_overround"] = inv_sum.loc[odds_available].astype(
+        np.float64
+    )
+    df.loc[odds_available, "prob_home"] = (
+        (inv_home / inv_sum).loc[odds_available].astype(np.float64)
+    )
+    df.loc[odds_available, "prob_draw"] = (
+        (inv_draw / inv_sum).loc[odds_available].astype(np.float64)
+    )
+    df.loc[odds_available, "prob_away"] = (
+        (inv_away / inv_sum).loc[odds_available].astype(np.float64)
+    )
+
+    prob_available = df[["prob_home", "prob_draw", "prob_away"]].notna().all(axis=1)
+    pseudo_prob = (~odds_available) & prob_available
+    df.loc[pseudo_prob, "odds_overround"] = 1.0
+
+    df["odds_available"] = (odds_available | pseudo_prob).astype(np.int64)
 
     # Long format for team rolling
     home_rows = pd.DataFrame(

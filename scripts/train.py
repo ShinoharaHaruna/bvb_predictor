@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -19,10 +20,16 @@ from bvb_predictor.data.dataset import (
 from bvb_predictor.features.league_rolling import build_league_features
 from bvb_predictor.models.poisson_mlp import (
     TeamPoissonScoreModel,
-    poisson_nll,
-    poisson_nll_weighted,
+    nb_dc_nll,
+    nb_dc_nll_weighted,
 )
-from bvb_predictor.utils.score_prob import score_matrix, topk_scores, wdl_probs
+from bvb_predictor.models.odds_mlp import OddsProbModel
+from bvb_predictor.utils.score_prob import (
+    score_matrix,
+    topk_scores,
+    wdl_probs,
+    score_matrix_nb_dc,
+)
 
 
 @dataclass(frozen=True)
@@ -47,6 +54,14 @@ class TrainConfig:
 def _set_seed(seed: int) -> None:
     torch.manual_seed(seed)
     np.random.seed(seed)
+
+
+def _resolve_device(device: str) -> torch.device:
+    if device == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device == "cuda" and not torch.cuda.is_available():
+        return torch.device("cpu")
+    return torch.device(device)
 
 
 def _time_split(
@@ -130,6 +145,24 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="auto",
+        help="Torch device: auto|cpu|cuda|cuda:0 ...",
+    )
+    parser.add_argument(
+        "--odds-model",
+        type=str,
+        default="",
+        help="Optional odds model checkpoint used to mix pseudo prob_* into training.",
+    )
+    parser.add_argument(
+        "--odds-mix-prob",
+        type=float,
+        default=0.0,
+        help="If >0 and --odds-model is set, replace prob_* with odds-model predicted probs for this fraction of train rows.",
+    )
     parser.add_argument("--patience", type=int, default=20)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-goals", type=int, default=6)
@@ -171,6 +204,8 @@ def main() -> None:
 
     _set_seed(cfg.seed)
 
+    device = _resolve_device(args.device)
+
     data_path = Path(cfg.data_csv)
     if not data_path.exists():
         raise FileNotFoundError(
@@ -191,6 +226,61 @@ def main() -> None:
     train_df = transform_league_categoricals(train_df, encoders)
     val_df = transform_league_categoricals(val_df, encoders)
     test_df = transform_league_categoricals(test_df, encoders)
+
+    if args.odds_model and args.odds_mix_prob and args.odds_mix_prob > 0:
+        odds_ckpt = torch.load(Path(args.odds_model), map_location="cpu")
+        odds_feature_cols: list[str] = odds_ckpt["feature_cols"]
+        odds_mu = pd.Series(odds_ckpt["feature_mu"], dtype=float)
+        odds_sigma = pd.Series(odds_ckpt["feature_sigma"], dtype=float).replace(
+            0.0, 1.0
+        )
+        odds_enc = odds_ckpt["encoders"]
+
+        odds_team_to_id: dict[str, int] = odds_enc["team_to_id"]
+        odds_league_to_id: dict[str, int] = odds_enc["league_to_id"]
+
+        odds_model = OddsProbModel(
+            num_numerical_features=len(odds_feature_cols),
+            num_teams=len(odds_team_to_id),
+            num_leagues=len(odds_league_to_id),
+        ).to(device)
+        odds_model.load_state_dict(odds_ckpt["model_state_dict"])
+        odds_model.eval()
+
+        # Only mix on rows where true prob_* exists (odds_available==1).
+        cand = train_df["odds_available"].astype(int).to_numpy() == 1
+        rng = np.random.default_rng(cfg.seed)
+        mix_mask = cand & (rng.random(len(train_df)) < float(args.odds_mix_prob))
+
+        if mix_mask.any():
+            x_num_s = train_df.loc[mix_mask, odds_feature_cols].astype(float)
+            x_num_s = x_num_s.fillna(odds_mu[odds_feature_cols])
+            x_num = (
+                (x_num_s - odds_mu[odds_feature_cols]) / odds_sigma[odds_feature_cols]
+            ).to_numpy(dtype=np.float32)
+            x_num_t = torch.tensor(x_num, dtype=torch.float32).to(device)
+
+            # Map categoricals for odds model.
+            home = train_df.loc[mix_mask, "home_team"].astype(str).to_list()
+            away = train_df.loc[mix_mask, "away_team"].astype(str).to_list()
+            league = train_df.loc[mix_mask, "league"].astype(str).to_list()
+
+            home_id = [odds_team_to_id[t] for t in home]
+            away_id = [odds_team_to_id[t] for t in away]
+            league_id = [odds_league_to_id[l] for l in league]
+            x_cat_t = torch.tensor(
+                np.stack([home_id, away_id, league_id], axis=1),
+                dtype=torch.long,
+            ).to(device)
+
+            with torch.no_grad():
+                logits = odds_model(x_num_t, x_cat_t)
+                probs = F.softmax(logits, dim=1).cpu().numpy()
+
+            train_df.loc[mix_mask, "prob_home"] = probs[:, 0].astype(np.float64)
+            train_df.loc[mix_mask, "prob_draw"] = probs[:, 1].astype(np.float64)
+            train_df.loc[mix_mask, "prob_away"] = probs[:, 2].astype(np.float64)
+            train_df.loc[mix_mask, "odds_overround"] = 1.0
 
     # Time-decay sample weight on train only.
     if cfg.time_decay_tau_days and cfg.time_decay_tau_days > 0:
@@ -218,8 +308,6 @@ def main() -> None:
     val_loader = DataLoader(val_ds, batch_size=cfg.batch_size, shuffle=False)
     test_loader = DataLoader(test_ds, batch_size=cfg.batch_size, shuffle=False)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
     model = TeamPoissonScoreModel(
         num_numerical_features=len(feature_cols),
         num_teams=len(encoders.team_to_id),
@@ -240,8 +328,8 @@ def main() -> None:
                 x = x.to(device)
                 cat = cat.to(device)
                 y = y.to(device)
-                lam = model(x, cat)
-                losses.append(float(poisson_nll(y, lam).item()))
+                mu_pred, rho_pred, alpha_pred = model(x, cat)
+                losses.append(float(nb_dc_nll(y, mu_pred, rho_pred, alpha_pred).item()))
         return float(np.mean(losses)) if losses else float("inf")
 
     def eval_metrics(loader: DataLoader) -> dict[str, float]:
@@ -261,20 +349,26 @@ def main() -> None:
                 cat = cat.to(device)
                 y = y.to(device)
 
-                lam = model(x, cat)
+                mu_pred, rho_pred, alpha_pred = model(x, cat)
                 y_cpu = y.detach().cpu().numpy()
-                lam_cpu = lam.detach().cpu().numpy()
+                mu_cpu = mu_pred.detach().cpu().numpy()
+                rho_cpu = rho_pred.detach().cpu().numpy()
+                alpha_cpu = alpha_pred.detach().cpu().numpy()
 
                 # MAE on lambda
-                mae_home.extend(np.abs(lam_cpu[:, 0] - y_cpu[:, 0]).tolist())
-                mae_away.extend(np.abs(lam_cpu[:, 1] - y_cpu[:, 1]).tolist())
+                mae_home.extend(np.abs(mu_cpu[:, 0] - y_cpu[:, 0]).tolist())
+                mae_away.extend(np.abs(mu_cpu[:, 1] - y_cpu[:, 1]).tolist())
 
                 for i in range(len(y_cpu)):
                     yh = int(round(float(y_cpu[i, 0])))
                     ya = int(round(float(y_cpu[i, 1])))
 
-                    mat = score_matrix(
-                        float(lam_cpu[i, 0]), float(lam_cpu[i, 1]), cfg.max_goals
+                    mat = score_matrix_nb_dc(
+                        float(mu_cpu[i, 0]),
+                        float(mu_cpu[i, 1]),
+                        float(alpha_cpu[i]),
+                        float(rho_cpu[i]),
+                        cfg.max_goals,
                     )
                     top = topk_scores(mat, k=cfg.topk)
                     if top:
@@ -315,11 +409,11 @@ def main() -> None:
             w = w.to(device)
 
             optimizer.zero_grad(set_to_none=True)
-            lam = model(x, cat)
+            mu_pred, rho_pred, alpha_pred = model(x, cat)
             if cfg.time_decay_tau_days and cfg.time_decay_tau_days > 0:
-                loss = poisson_nll_weighted(y, lam, w)
+                loss = nb_dc_nll_weighted(y, mu_pred, rho_pred, alpha_pred, w)
             else:
-                loss = poisson_nll(y, lam)
+                loss = nb_dc_nll(y, mu_pred, rho_pred, alpha_pred)
             loss.backward()
             optimizer.step()
 
@@ -380,11 +474,11 @@ def main() -> None:
                     y = y.to(device)
                     w = w.to(device)
                     ft_optim.zero_grad(set_to_none=True)
-                    lam = model(x, cat)
+                    mu_pred, rho_pred, alpha_pred = model(x, cat)
                     if cfg.time_decay_tau_days and cfg.time_decay_tau_days > 0:
-                        loss = poisson_nll_weighted(y, lam, w)
+                        loss = nb_dc_nll_weighted(y, mu_pred, rho_pred, alpha_pred, w)
                     else:
-                        loss = poisson_nll(y, lam)
+                        loss = nb_dc_nll(y, mu_pred, rho_pred, alpha_pred)
                     loss.backward()
                     ft_optim.step()
     test_loss = eval_loss(test_loader)

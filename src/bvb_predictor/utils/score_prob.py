@@ -11,6 +11,37 @@ def poisson_pmf(k: int, lam: float) -> float:
     return (lam**k) * math.exp(-lam) / math.factorial(k)
 
 
+def nb_pmf(k: int, mu: float, alpha: float) -> float:
+    if mu <= 0:
+        return 0.0
+    if alpha <= 0:
+        return poisson_pmf(k, mu)
+
+    r = 1.0 / alpha
+    p = r / (r + mu)
+    # log pmf to avoid overflow
+    logp = (
+        math.lgamma(k + r)
+        - math.lgamma(r)
+        - math.lgamma(k + 1)
+        + r * math.log(p)
+        + k * math.log(max(1.0 - p, 1e-12))
+    )
+    return float(math.exp(logp))
+
+
+def _dc_tau(x: int, y: int, lam_home: float, lam_away: float, rho: float) -> float:
+    if x == 0 and y == 0:
+        return 1.0 - (lam_home * lam_away * rho)
+    if x == 0 and y == 1:
+        return 1.0 + (lam_home * rho)
+    if x == 1 and y == 0:
+        return 1.0 + (lam_away * rho)
+    if x == 1 and y == 1:
+        return 1.0 - rho
+    return 1.0
+
+
 def score_matrix(lam_home: float, lam_away: float, max_goals: int) -> np.ndarray:
     p_home = np.array(
         [poisson_pmf(k, lam_home) for k in range(max_goals + 1)], dtype=np.float64
@@ -24,6 +55,27 @@ def score_matrix(lam_home: float, lam_away: float, max_goals: int) -> np.ndarray
     if s > 0:
         mat = mat / s
 
+    return mat
+
+
+def score_matrix_nb_dc(
+    lam_home: float, lam_away: float, alpha: float, rho: float, max_goals: int
+) -> np.ndarray:
+    p_home = np.array(
+        [nb_pmf(k, lam_home, alpha) for k in range(max_goals + 1)], dtype=np.float64
+    )
+    p_away = np.array(
+        [nb_pmf(k, lam_away, alpha) for k in range(max_goals + 1)], dtype=np.float64
+    )
+
+    mat = np.outer(p_home, p_away)
+    for x in range(min(2, max_goals + 1)):
+        for y in range(min(2, max_goals + 1)):
+            mat[x, y] *= _dc_tau(x, y, lam_home, lam_away, rho)
+
+    s = float(mat.sum())
+    if s > 0:
+        mat = mat / s
     return mat
 
 

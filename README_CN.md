@@ -4,7 +4,7 @@
 
 ## 摘要
 
-本仓库实现了一个轻量级、可复现的管道，用于足球**概率性精确比分预测**。我们将主队和客队进球建模为条件独立的泊松变量，其速率分别为 $\lambda_{home}$ 和 $\lambda_{away}$，并通过一个带有球队嵌入和时间感知的赛前特征的神经网络进行预测。
+本仓库实现了一个轻量级、可复现的管道，用于足球**概率性精确比分预测**。我们通过一个带有球队/联赛嵌入与时间感知赛前特征的神经网络来预测进球分布，并输出完整的比分概率矩阵（在有界网格内）及其导出的胜/平/负概率。
 
 主要设计目标：
 
@@ -16,11 +16,46 @@
 
 ### 问题表述
 
-给定一场比赛 $(home, away, t)$，预测 $\lambda_{home}$ 和 $\lambda_{away}$。然后我们得到比分分布：
+给定一场比赛 $(home, away, t)$，预测期望进球数 $\mu_{home}$ 和 $\mu_{away}$，并在目标网格 $[0,\dots,G]$ 上得到有界的精确比分分布。
+
+除了基线的独立泊松比分模型外，我们还支持：
+
+- **Negative Binomial (NB)**：用于建模过度离散（方差 > 均值）
+- **Dixon-Coles (DC)**：用于低比分区域的相关性修正
+
+当前训练/推理默认使用 **NB + DC**，并按联赛学习可训练参数：
+
+- $\rho_{league}$：Dixon-Coles 相关参数
+- $\alpha_{league}$：Negative Binomial dispersion 参数
+
+#### NB+DC 比分分布（有界网格）
+
+我们采用 Negative Binomial 的均值-离散度参数化（均值 $\mu$，dispersion $\alpha$）：
 
 $$
-P(H=h, A=a) = \text{Poisson}(h;\lambda_{home})\;\text{Poisson}(a;\lambda_{away}),\quad h,a \in [0,\dots,G].
+P_{NB}(X=k\mid \mu,\alpha)=\frac{\Gamma(k+\alpha^{-1})}{\Gamma(\alpha^{-1})\,k!}\left(\frac{\alpha^{-1}}{\alpha^{-1}+\mu}\right)^{\alpha^{-1}}\left(\frac{\mu}{\alpha^{-1}+\mu}\right)^k.
 $$
+
+Dixon-Coles 在低比分区域使用修正因子 $\tau(h,a)$：
+
+$$
+\tau(h,a)=
+\begin{cases}
+1-\mu_{home}\mu_{away}\rho, & (h,a)=(0,0)\\
+1+\mu_{home}\rho, & (h,a)=(0,1)\\
+1+\mu_{away}\rho, & (h,a)=(1,0)\\
+1-\rho, & (h,a)=(1,1)\\
+1, & \text{其他情况.}
+\end{cases}
+$$
+
+在有界网格 $h,a\in[0,\dots,G]$ 上，联合分布定义为：
+
+$$
+P(H=h,A=a) \propto \tau(h,a)\,P_{NB}(H=h\mid\mu_{home},\alpha)\,P_{NB}(A=a\mid\mu_{away},\alpha),
+$$
+
+并在网格内归一化。
 
 ### 模型
 
@@ -29,9 +64,10 @@ $$
 - 球队嵌入：`home_team_id`，`away_team_id`
 - 联赛嵌入：`league_id`
 - MLP 骨干（ReLU + BatchNorm + Dropout）
-- 双头 `Softplus` 输出以确保 $\lambda>0$
+- 双头 `Softplus` 输出以确保 $\mu>0$
+- 按联赛可学习的 $\rho$（DC）与 $\alpha$（NB）
 
-训练目标是泊松负对数似然（NLL）。启用时，使用**时间衰减**加权变体。
+训练目标是 **NB+DC 负对数似然（NLL）**。启用时，使用**时间衰减**加权变体。
 
 ### 时间感知学习 (A+B+C)
 
@@ -76,13 +112,19 @@ match_id,date,league,season,home_team,away_team,home_score,away_score,odds_home,
 
 `src/bvb_predictor/features/league_rolling.py` 实现了 `build_league_features`：
 
-- 滚动式赛前球队统计数据（偏移）：L5/L10 的进球数/失球数/净胜球，以及主场专属/客场专属的 L10。
+- 滚动式赛前球队统计数据（偏移）：L1/L3/L5 的进球数/失球数/净胜球，并包含主场专属/客场专属拆分。
+- 指数滑动平均（EMA）特征（GF/GA/GD）。
 - 休息日特征：`home_rest_days`，`away_rest_days`（自上次比赛以来的天数）。
 - 赛季特征：`season_start_year`。
 - 赔率衍生信号：
   - 隐含概率 `prob_home/prob_draw/prob_away`
   - 返还率 `odds_overround`
   - 可用性标志 `odds_available`
+
+赔率/概率特征支持两种模式：
+
+- 若存在原始赔率（`odds_home/draw/away`），则归一化得到 `prob_*`。
+- 若缺少赔率但提供了 `prob_*`（例如由 odds 模型预测得到），则直接使用并视作可用。
 
 所有特征均按时间顺序计算，并使用 `shift(1)` 来防止未来数据泄露。
 
@@ -91,6 +133,7 @@ match_id,date,league,season,home_team,away_team,home_score,away_score,odds_home,
 ### 脚本入口点
 
 - 训练：`scripts/train.py`
+- 赔率模型训练（可选）：`scripts/train_odds.py`
 - 推理：`scripts/predict.py`
 - 便捷包装器：
   - `run_train.sh`
@@ -107,16 +150,22 @@ match_id,date,league,season,home_team,away_team,home_score,away_score,odds_home,
 生成物：
 
 - `artifacts/model.pt`（模型权重 + 编码器 + 归一化统计数据）
+- `artifacts/odds.pt`（可选：赔率模型权重 + 编码器 + 归一化统计数据）
 - `artifacts/metrics.json`（评估摘要）
 
 ### 指标
 
 `scripts/train.py` 报告：
 
-- 验证/测试集上的泊松 NLL
-- $\lambda$ 与实际进球数的 MAE
+- 验证/测试集上的 NB+DC NLL
+- $\mu$ 与实际进球数的 MAE
 - 胜/平/负准确率（从预测比分矩阵导出）
 - 精确比分 top-1 和 top-k 命中率
+
+当存在赔率模型时，训练支持可选的 **odds mix**：
+
+- 将一部分训练样本的 `prob_home/draw/away` 替换为赔率模型预测的概率。
+- 用于降低推理时“用户不提供真实赔率”的分布偏移。
 
 ## 推理
 
@@ -128,11 +177,29 @@ match_id,date,league,season,home_team,away_team,home_score,away_score,odds_home,
 
 预测器返回一个 JSON，其中包含：
 
-- `lambda_home`，`lambda_away`
+- `mu_home`，`mu_away`
+- `rho`，`alpha`
 - `topk_scores`（$[0,G]$ 内最可能的比分线）
 - `wdl`（主队/平局/客队概率）
 
 推理支持**任意比赛日期**：历史行会自动截断到目标日期之前的数据。
+
+推理支持可选的 **odds 模型**：
+
+- 当用户不提供原始赔率且提供 `--odds-model artifacts/odds.pt` 时，推理会先预测 `prob_home/draw/away` 并作为 pseudo-odds 特征参与比分预测。
+
+## GPU / device
+
+所有 torch 入口脚本支持 `--device`：
+
+- `auto`（默认）：可用则用 CUDA
+- `cpu`
+- `cuda` / `cuda:0` / ...
+
+包装脚本也提供 `DEVICE` 变量：
+
+- `run_train.sh`：为 `train_odds.py` 与 `train.py` 透传 `--device`
+- `run_predict.sh`：为 `predict.py` 透传 `--device`
 
 ## 仓库结构
 
@@ -149,6 +216,7 @@ src/bvb_predictor/
 
 scripts/
   train.py
+  train_odds.py
   predict.py
   data/
     fetch_football_data.py

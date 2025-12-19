@@ -89,6 +89,8 @@ def main() -> None:
         and (not pd.notna(args.odds_away))
     )
 
+    odds_model_output: dict[str, float] | None = None
+
     if need_pseudo_prob:
         odds_ckpt = torch.load(Path(args.odds_model), map_location="cpu")
         odds_feature_cols: list[str] = odds_ckpt["feature_cols"]
@@ -145,9 +147,26 @@ def main() -> None:
             logits = odds_model(x_num_t, x_cat_t)
             probs = F.softmax(logits, dim=1).squeeze(0).cpu().numpy().tolist()
 
-        upcoming_dict["prob_home"] = float(probs[0])
-        upcoming_dict["prob_draw"] = float(probs[1])
-        upcoming_dict["prob_away"] = float(probs[2])
+        prob_home = float(probs[0])
+        prob_draw = float(probs[1])
+        prob_away = float(probs[2])
+
+        upcoming_dict["prob_home"] = prob_home
+        upcoming_dict["prob_draw"] = prob_draw
+        upcoming_dict["prob_away"] = prob_away
+
+        odds_model_output = {
+            "probabilities": {
+                "home": prob_home,
+                "draw": prob_draw,
+                "away": prob_away,
+            },
+            "decimal_odds": {
+                "home": float("inf") if prob_home <= 0 else 1.0 / prob_home,
+                "draw": float("inf") if prob_draw <= 0 else 1.0 / prob_draw,
+                "away": float("inf") if prob_away <= 0 else 1.0 / prob_away,
+            },
+        }
 
     feats = build_league_features(
         pd.concat([raw, pd.DataFrame([upcoming_dict])], ignore_index=True)
@@ -202,6 +221,9 @@ def main() -> None:
         "topk_scores": [{"home": h, "away": a, "p": p} for h, a, p in topk],
         "wdl": {"home_win": p_home, "draw": p_draw, "away_win": p_away},
     }
+
+    if odds_model_output is not None:
+        out["odds_model"] = odds_model_output
 
     print(json.dumps(out, ensure_ascii=False))
 

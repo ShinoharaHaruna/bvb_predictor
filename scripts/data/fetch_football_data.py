@@ -12,6 +12,8 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from tqdm import tqdm
+
 
 BASE_URL = "https://www.football-data.co.uk/mmz4281/"
 
@@ -169,6 +171,11 @@ def main() -> None:
 
     parser.add_argument("--retries", type=int, default=2)
     parser.add_argument("--sleep", type=float, default=1.0)
+    parser.add_argument(
+        "--force-refresh",
+        action="store_true",
+        help="Ignore cache and re-download matching files.",
+    )
 
     args = parser.parse_args()
 
@@ -209,12 +216,13 @@ def main() -> None:
     items_out: list[dict[str, Any]] = []
     existing_by_out = {it.get("out_path"): it for it in manifest.get("items", [])}
 
-    for it in plan:
+    for it in tqdm(plan, desc="Downloading", unit="file"):
         out_path = Path(it.out_path)
 
         # Cache: if file exists and manifest contains sha256, we skip.
         prev = existing_by_out.get(str(out_path))
-        if out_path.exists() and prev and prev.get("sha256"):
+        if not args.force_refresh and out_path.exists() and prev and prev.get("sha256"):
+            print(f"[cache] Skip {out_path}", file=sys.stderr)
             items_out.append(prev)
             continue
 

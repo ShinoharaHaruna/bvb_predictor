@@ -11,9 +11,9 @@ DEVICE="auto"
 
 # Example 1: Real match but not in dataset
 LEAGUE="Bundesliga"
-HOME_TEAM="Freiburg"
+HOME_TEAM="M'gladbach"
 AWAY_TEAM="Dortmund"
-DATE="2025-12-14T14:30:00Z"
+DATE="2025-12-19T19:30:00Z"
 
 # Example 2: Real match in dataset
 # LEAGUE="Bundesliga"

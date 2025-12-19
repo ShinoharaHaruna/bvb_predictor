@@ -6,13 +6,14 @@ MODEL_PATH="artifacts/model.pt"
 ODDS_MODEL_PATH="artifacts/odds.pt"
 DATA_PATH="data/processed/matches.csv"
 DEVICE="auto"
+VERBOSE=1
 
 # -------- Match (edit here) --------
 
 # Example 1: Real match but not in dataset
 LEAGUE="Bundesliga"
-HOME_TEAM="M'gladbach"
-AWAY_TEAM="Dortmund"
+HOME_TEAM="Dortmund"
+AWAY_TEAM="M'gladbach"
 DATE="2025-12-19T19:30:00Z"
 
 # Example 2: Real match in dataset
@@ -38,8 +39,8 @@ ODDS_HOME=""
 ODDS_DRAW=""
 ODDS_AWAY=""
 
-MAX_GOALS=6
 TOPK=10
+MAX_GOALS=-1
 
 # -------- Build command --------
 CMD=(uv run scripts/predict.py
@@ -51,8 +52,9 @@ CMD=(uv run scripts/predict.py
 	--home "${HOME_TEAM}"
 	--away "${AWAY_TEAM}"
 	--date "${DATE}"
+	--topk "${TOPK}"
 	--max-goals "${MAX_GOALS}"
-	--topk "${TOPK}")
+)
 
 if [[ -n "${ODDS_HOME}" ]]; then
 	CMD+=(--odds-home "${ODDS_HOME}")
@@ -62,6 +64,9 @@ if [[ -n "${ODDS_DRAW}" ]]; then
 fi
 if [[ -n "${ODDS_AWAY}" ]]; then
 	CMD+=(--odds-away "${ODDS_AWAY}")
+fi
+if [[ "${VERBOSE}" -eq 1 ]]; then
+	CMD+=(--verbose)
 fi
 
 # -------- Run --------

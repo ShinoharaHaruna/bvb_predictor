@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 import pandas as pd
@@ -11,7 +12,12 @@ import torch.nn.functional as F
 from bvb_predictor.features.league_rolling import build_league_features
 from bvb_predictor.models.poisson_mlp import TeamPoissonScoreModel
 from bvb_predictor.models.odds_mlp import OddsProbModel
-from bvb_predictor.utils.score_prob import score_matrix_nb_dc, topk_scores, wdl_probs
+from bvb_predictor.utils.score_prob import (
+    nb_pmf,
+    score_matrix_nb_dc,
+    topk_scores,
+    wdl_probs,
+)
 
 
 def _resolve_device(device: str) -> torch.device:
@@ -20,6 +26,29 @@ def _resolve_device(device: str) -> torch.device:
     if device == "cuda" and not torch.cuda.is_available():
         return torch.device("cpu")
     return torch.device(device)
+
+
+def _auto_max_goals(
+    lam_home: float,
+    lam_away: float,
+    alpha: float,
+    tail_eps: float = 1e-5,
+    min_cap: int = 0,
+    max_cap: int = 12,
+) -> int:
+    def _cutoff(lam: float) -> int:
+        if lam <= 0:
+            return 0
+        cumulative = 0.0
+        k = -1
+        while cumulative < (1.0 - tail_eps) and k < max_cap:
+            k += 1
+            cumulative += nb_pmf(k, lam, alpha)
+        return k
+
+    home_cut = _cutoff(lam_home)
+    away_cut = _cutoff(lam_away)
+    return max(min_cap, home_cut, away_cut)
 
 
 def main() -> None:
@@ -36,6 +65,11 @@ def main() -> None:
     parser.add_argument("--home", type=str, required=True)
     parser.add_argument("--away", type=str, required=True)
     parser.add_argument("--date", type=str, required=True)
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print additional runtime info to stderr.",
+    )
     parser.add_argument("--odds-home", type=float, default=float("nan"))
     parser.add_argument("--odds-draw", type=float, default=float("nan"))
     parser.add_argument("--odds-away", type=float, default=float("nan"))
@@ -45,7 +79,12 @@ def main() -> None:
         default="",
         help="Optional odds model checkpoint. If set and odds are omitted, use it to predict prob_home/draw/away.",
     )
-    parser.add_argument("--max-goals", type=int, default=6)
+    parser.add_argument(
+        "--max-goals",
+        type=int,
+        default=-1,
+        help="Score matrix cutoff. Negative means auto-select via model outputs.",
+    )
     parser.add_argument("--topk", type=int, default=10)
 
     args = parser.parse_args()
@@ -207,9 +246,14 @@ def main() -> None:
     alpha = float(alpha_t.squeeze(0).cpu().item())
 
     mu_home, mu_away = float(mu[0]), float(mu[1])
-    mat = score_matrix_nb_dc(
-        mu_home, mu_away, alpha=alpha, rho=rho, max_goals=args.max_goals
+    max_goals = (
+        args.max_goals
+        if args.max_goals >= 0
+        else _auto_max_goals(mu_home, mu_away, alpha)
     )
+    if args.verbose:
+        print(f"[predict] max_goals={max_goals}", file=sys.stderr)
+    mat = score_matrix_nb_dc(mu_home, mu_away, alpha, rho, max_goals)
     topk = topk_scores(mat, k=args.topk)
     p_home, p_draw, p_away = wdl_probs(mat)
 
@@ -218,6 +262,7 @@ def main() -> None:
         "mu_away": mu_away,
         "rho": rho,
         "alpha": alpha,
+        "max_goals": max_goals,
         "topk_scores": [{"home": h, "away": a, "p": p} for h, a, p in topk],
         "wdl": {"home_win": p_home, "draw": p_draw, "away_win": p_away},
     }

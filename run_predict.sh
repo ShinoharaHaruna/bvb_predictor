@@ -13,8 +13,8 @@ VERBOSE=1
 # Example 1: Real match but not in dataset
 LEAGUE="Bundesliga"
 HOME_TEAM="Dortmund"
-AWAY_TEAM="M'gladbach"
-DATE="2025-12-19T19:30:00Z"
+AWAY_TEAM="Werder Bremen"
+DATE="2026-01-13T19:30:00Z"
 
 # Example 2: Real match in dataset
 # LEAGUE="Bundesliga"

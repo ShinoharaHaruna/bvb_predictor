@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import difflib
 import math
 import sys
 from dataclasses import dataclass
@@ -51,6 +52,24 @@ def _auto_max_goals(
     cut = max(min_cap, cut)
     cut = min(max_cap, cut)
     return cut
+
+
+def _collect_team_names(df: pd.DataFrame) -> list[str]:
+    teams = pd.unique(pd.concat([df["home_team"], df["away_team"]], ignore_index=True))
+    return sorted(t for t in teams if pd.notna(t))
+
+
+def _team_suggestions(name: str, catalog: list[str], limit: int = 5) -> list[str]:
+    if not catalog:
+        return []
+    return difflib.get_close_matches(name, catalog, n=limit, cutoff=0.6)
+
+
+def _team_hint_suffix(name: str, catalog: list[str]) -> str:
+    suggestions = _team_suggestions(name, catalog)
+    if not suggestions:
+        return ""
+    return f" Closest teams: {', '.join(suggestions)}."
 
 
 @dataclass(frozen=True)
@@ -107,6 +126,7 @@ def _maybe_run_odds_model(
     raw: pd.DataFrame,
     upcoming_dict: dict[str, Any],
     device: torch.device,
+    team_catalog: list[str],
 ) -> tuple[pd.DataFrame, dict[str, Any] | None]:
     need_pseudo_prob = (
         req.odds_model_path
@@ -147,9 +167,14 @@ def _maybe_run_odds_model(
     ).to_numpy()
     x_num_t = torch.tensor(x_num, dtype=torch.float32).unsqueeze(0).to(device)
 
-    if req.home_team not in odds_team_to_id or req.away_team not in odds_team_to_id:
+    missing_odds_teams = [
+        team for team in (req.home_team, req.away_team) if team not in odds_team_to_id
+    ]
+    if missing_odds_teams:
+        hint = _team_hint_suffix(missing_odds_teams[0], team_catalog)
+        names = ", ".join(missing_odds_teams)
         raise ValueError(
-            "Unseen team for odds model. Retrain odds model to include it."
+            f"Unseen team for odds model: {names}. Retrain odds model to include it.{hint}"
         )
     if req.league not in odds_league_to_id:
         raise ValueError(
@@ -199,6 +224,7 @@ def predict_match(req: PredictRequest) -> dict[str, Any]:
     model, meta = _load_main_model(Path(req.model_path), device)
 
     raw = pd.read_csv(Path(req.data_path))
+    team_catalog = _collect_team_names(raw)
     raw_dates = pd.to_datetime(raw["date"], utc=True)
     upcoming_dt = pd.to_datetime(req.kickoff_iso, utc=True)
     hist = raw.loc[raw_dates < upcoming_dt].copy()
@@ -218,7 +244,11 @@ def predict_match(req: PredictRequest) -> dict[str, Any]:
     }
 
     hist_with_odds, odds_model_output = _maybe_run_odds_model(
-        req=req, raw=hist, upcoming_dict=upcoming_dict, device=device
+        req=req,
+        raw=hist,
+        upcoming_dict=upcoming_dict,
+        device=device,
+        team_catalog=team_catalog,
     )
 
     feats = build_league_features(
@@ -238,12 +268,14 @@ def predict_match(req: PredictRequest) -> dict[str, Any]:
     league_to_id: dict[str, int] = meta["league_to_id"]
 
     if req.home_team not in team_to_id:
+        hint = _team_hint_suffix(req.home_team, team_catalog)
         raise ValueError(
-            f"Unseen home team: {req.home_team}. Retrain model to include it."
+            f"Unseen home team: {req.home_team}. Retrain model to include it.{hint}"
         )
     if req.away_team not in team_to_id:
+        hint = _team_hint_suffix(req.away_team, team_catalog)
         raise ValueError(
-            f"Unseen away team: {req.away_team}. Retrain model to include it."
+            f"Unseen away team: {req.away_team}. Retrain model to include it.{hint}"
         )
     if req.league not in league_to_id:
         raise ValueError(f"Unseen league: {req.league}. Retrain model to include it.")

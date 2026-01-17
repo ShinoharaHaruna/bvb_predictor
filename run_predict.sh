@@ -13,8 +13,9 @@ VERBOSE=1
 # Example 1: Real match but not in dataset
 LEAGUE="Bundesliga"
 HOME_TEAM="Dortmund"
-AWAY_TEAM="Werder Bremen"
-DATE="2026-01-13T19:30:00Z"
+AWAY_TEAM="St Pauli"
+DATE="2026-01-17 22:30"
+DATE_TZ="CST"
 
 # Example 2: Real match in dataset
 # LEAGUE="Bundesliga"
@@ -52,6 +53,7 @@ CMD=(uv run scripts/predict.py
 	--home "${HOME_TEAM}"
 	--away "${AWAY_TEAM}"
 	--date "${DATE}"
+	--date-tz "${DATE_TZ}"
 	--topk "${TOPK}"
 	--max-goals "${MAX_GOALS}"
 )
